@@ -1,7 +1,3 @@
-Here is an updated **GitHub README** for your Solar Power Prediction project:
-
----
-
 # Solar Power Prediction 🌞
 
 This project predicts solar power output based on geolocation, weather data, and solar panel configurations. It allows users to estimate daily and annual savings from solar power production using various customizable parameters, including panel size, efficiency, and tilt. It also provides economic analysis, such as ROI and installation cost estimation.
