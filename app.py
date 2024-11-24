@@ -1,22 +1,112 @@
 import streamlit as st
 from streamlit_folium import st_folium
 import folium
-from folium.plugins import MarkerCluster
 from datetime import datetime
 import pytz
 from pysolar.solar import get_altitude
 import math
-import matplotlib.pyplot as plt
+import plotly.express as px
+import pandas as pd
 import requests
+from dataclasses import dataclass
+import matplotlib.pyplot as plt
+import os
+from dotenv import load_dotenv
 
-# Predefined locations with latitude, longitude, and timezone
-locations = {
-    "Riyadh": {"lat": 24.7136, "lon": 46.6753, "timezone": "Asia/Riyadh"},
-    "Phoenix": {"lat": 33.4484, "lon": -112.0740, "timezone": "America/Phoenix"},
-    "London": {"lat": 51.5074, "lon": -0.1278, "timezone": "Europe/London"},
-    "Berlin": {"lat": 52.5200, "lon": 13.4050, "timezone": "Europe/Berlin"},
-    "Tokyo": {"lat": 35.6895, "lon": 139.6917, "timezone": "Asia/Tokyo"},
-}
+# Load environment variables from .env file
+load_dotenv()
+OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
+NREL_API_KEY = os.getenv("NREL_API_KEY")
+TIMEZONE_API_KEY = os.getenv("TIMEZONE_API_KEY")
+DEFAULT_ELECTRICITY_PRICE = 0.12  # Default price for non-US locations
+
+# Standard Solar Panel Assumptions
+DEFAULT_PANEL_AREA = 1.68  # m² (standard panel size)
+DEFAULT_PANEL_EFFICIENCY = 0.22  # 22% efficiency
+
+# Validate API keys
+if not OPENWEATHER_API_KEY:
+    st.error("OpenWeather API key is missing. Add it to the .env file.")
+    st.stop()
+
+if not NREL_API_KEY:
+    st.warning("NREL API key is missing. US electricity pricing will default to $0.12/kWh.")
+
+# Function to search for location using OpenWeather Geocoding API
+def search_location(query, api_key=OPENWEATHER_API_KEY):
+    url = f"http://api.openweathermap.org/geo/1.0/direct?q={query}&limit=1&appid={api_key}"
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+        if len(data) > 0:
+            return data[0]["lat"], data[0]["lon"], data[0]["name"]
+        else:
+            st.warning("Location not found. Please try a different search.")
+            return None, None, None
+    except requests.exceptions.RequestException:
+        st.error("Error searching for location. Please check your network or API key.")
+        return None, None, None
+
+# Function to fetch location name using OpenWeather reverse geocoding
+def fetch_location_name(lat, lon, api_key=OPENWEATHER_API_KEY):
+    url = f"http://api.openweathermap.org/geo/1.0/reverse?lat={lat}&lon={lon}&limit=1&appid={api_key}"
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+        if data and "name" in data[0]:
+            return data[0]["name"]
+        return f"Lat: {lat}, Lon: {lon}"  # Fallback if no name is found
+    except requests.exceptions.RequestException:
+        return f"Lat: {lat}, Lon: {lon}"  # Fallback if API fails
+
+# Function to fetch real-time weather data from OpenWeather
+def fetch_weather_data(lat, lon, api_key=OPENWEATHER_API_KEY):
+    url = f"http://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={api_key}&units=metric"
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+        cloud_cover = data["clouds"]["all"]
+        temperature = data["main"]["temp"]
+        humidity = data["main"]["humidity"]
+        wind_speed = data["wind"]["speed"]
+        return cloud_cover, temperature, humidity, wind_speed
+    except requests.exceptions.RequestException:
+        st.warning("Error fetching weather data. Using default values.")
+        return 50, 25, 50, 0  # Default values if API fails
+
+# Function to fetch electricity prices from NREL (US only)
+def fetch_electricity_price(lat, lon, api_key=NREL_API_KEY):
+    url = f"https://developer.nrel.gov/api/utility_rates/v3.json?api_key={api_key}&lat={lat}&lon={lon}"
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+        residential_rate = data["outputs"].get("residential")
+        if residential_rate is None or not isinstance(residential_rate, (int, float)):
+            return None  # Return None if no valid data
+        return residential_rate
+    except requests.exceptions.RequestException:
+        return None  # Return None if API fails
+
+# Function to fetch timezone information using TimeZoneDB API
+def fetch_timezone(lat: float, lon: float) -> pytz.timezone:
+    """Fetch timezone information using TimeZoneDB API."""
+    url = f"http://api.timezonedb.com/v2.1/get-time-zone?key={TIMEZONE_API_KEY}&format=json&by=position&lat={lat}&lng={lon}"
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+        if "zoneName" in data:
+            return pytz.timezone(data["zoneName"])
+        else:
+            st.warning("Timezone data not available. Defaulting to UTC.")
+            return pytz.UTC
+    except Exception as e:
+        st.warning(f"Could not fetch timezone: {e}. Defaulting to UTC.")
+        return pytz.UTC
 
 # Function to calculate zenith angle
 def calculate_zenith_angle(lat, lon, time):
@@ -25,7 +115,7 @@ def calculate_zenith_angle(lat, lon, time):
     return max(zenith_angle, 0)
 
 # Function to calculate GHI
-def calculate_ghi(lat, lon, time, cloud_cover, temperature=25, humidity=50, wind_speed=0):
+def calculate_ghi(lat, lon, time, cloud_cover, temperature=25, humidity=50):
     zenith_angle = calculate_zenith_angle(lat, lon, time)
     dni = 1000 * (1 - cloud_cover / 100)  # Simplified DNI
     dhi = 100 * (cloud_cover / 100)       # Simplified DHI
@@ -38,110 +128,81 @@ def calculate_ghi(lat, lon, time, cloud_cover, temperature=25, humidity=50, wind
 
     # Combine DNI and DHI for GHI
     ghi = (dni * math.cos(math.radians(zenith_angle)) + dhi) * temperature_factor
-
     return max(ghi, 0)
 
 # Function to calculate power output
-def calculate_power_output(ghi, panel_area=1.6, efficiency=0.2):
+def calculate_power_output(ghi, panel_area, efficiency):
     return ghi * panel_area * efficiency
 
-# Function to fetch real-time weather data
-def fetch_weather_data(lat, lon, api_key="2944aa74d63a7db9f72439884e6ee599"):
-    url = f"http://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={api_key}&units=metric"
-    try:
-        response = requests.get(url)
-        response.raise_for_status()
-        data = response.json()
-        cloud_cover = data["clouds"]["all"]
-        temperature = data["main"]["temp"]
-        humidity = data["main"]["humidity"]
-        wind_speed = data["wind"]["speed"]
-        return cloud_cover, temperature, humidity, wind_speed
-    except requests.exceptions.RequestException as e:
-        st.error(f"Error fetching weather data: {e}")
-        return 0, 25, 50, 0  # Defaults if API fails
-
 # Streamlit interface
-st.title("🌞 Real-Time Solar Power Prediction")
-st.markdown("Select a location, date, and time range to predict solar power output.")
+st.title("☀️ Solar Power Prediction with Advanced Features")
+st.markdown("Select a location, date, and time range to predict solar power output and analyze energy savings.")
 
-# Create an enhanced Folium map
-m = folium.Map(location=[20.0, 0.0], zoom_start=2, tiles="CartoDB Positron")  # Use a cleaner basemap
-marker_cluster = MarkerCluster().add_to(m)
-
-# Add clustered markers for predefined locations
-for city, coords in locations.items():
-    folium.Marker(
-        [coords["lat"], coords["lon"]],
-        popup=f"{city} (Lat: {coords['lat']}, Lon: {coords['lon']})",
-        tooltip=f"Click for details: {city}",
-        icon=folium.Icon(color="blue", icon="info-sign")
-    ).add_to(marker_cluster)
-
-# Display map and get selected location
-selected_location = st_folium(m, width=700, height=500)
-
-# Default values for location
-if selected_location and selected_location["last_clicked"]:
-    lat, lon = selected_location["last_clicked"]["lat"], selected_location["last_clicked"]["lng"]
-    st.write(f"**Selected Location:** Latitude {lat}, Longitude {lon}")
-    timezone = pytz.timezone("UTC")  # Default to UTC
+# Location search box
+search_query = st.text_input("Search for a location:")
+if search_query:
+    lat, lon, location_name = search_location(search_query)
 else:
-    st.write("Select a location from the map.")
-    default_city = st.selectbox("Or choose from the dropdown:", list(locations.keys()))
-    lat, lon = locations[default_city]["lat"], locations[default_city]["lon"]
-    timezone = pytz.timezone(locations[default_city]["timezone"])
+    lat, lon, location_name = None, None, None
 
-# Date selection
-selected_date = st.date_input("Select a date:", datetime.now().date())
-selected_datetime = datetime.combine(selected_date, datetime.min.time())  # Combine date with default time
+# Show map if location search is successful
+if lat and lon:
+    st.write(f"**Selected Location:** {location_name} (Lat: {lat}, Lon: {lon})")
+    m = folium.Map(location=[lat, lon], zoom_start=10)
+    folium.Marker([lat, lon], popup=location_name).add_to(m)
+    st_folium(m, width=700, height=500)
+else:
+    st.warning("Please search for a valid location.")
 
-# Fetch real-time weather data
-cloud_cover, temperature, humidity, wind_speed = fetch_weather_data(lat, lon)
-st.write(f"**Real-Time Weather Data:**")
-st.write(f"- Cloud Cover: {cloud_cover}%")
-st.write(f"- Temperature: {temperature}°C")
-st.write(f"- Humidity: {humidity}%")
-st.write(f"- Wind Speed: {wind_speed} m/s")
+# Fetch weather data
+if lat and lon:
+    cloud_cover, temperature, humidity, wind_speed = fetch_weather_data(lat, lon)
 
-# Time range selection
-time_range = st.slider("Select a time range (hours):", 6, 18, (8, 16))
+    # Fetch electricity price or allow user input for non-US locations
+    electricity_price = fetch_electricity_price(lat, lon)
+    if electricity_price is None:
+        st.warning("Electricity price data unavailable for this location.")
+        monthly_electricity_cost = st.number_input("Enter your monthly electricity cost ($):", min_value=0.0, value=100.0, step=1.0)
+        electricity_price = (monthly_electricity_cost / 30) / 30  # Approximate price per kWh
+    else:
+        st.write(f"**Electricity Price:** ${electricity_price:.2f}/kWh")
 
-# Electricity cost input
-electricity_cost = st.number_input("Electricity Cost ($/kWh):", min_value=0.0, value=0.12)
+    # Time range selection
+    time_range = st.slider("Time Range (hours):", 6, 18, (8, 16))
+    hours = list(range(time_range[0], time_range[1] + 1))
 
-# Calculate GHI and Power Output for time range
-hours = list(range(time_range[0], time_range[1] + 1))
-ghi_values = []
-power_outputs = []
+    # Advanced options in expander
+    with st.expander("Advanced Configuration"):
+        panel_area = st.number_input("Solar Panel Area (m²):", min_value=1.0, value=DEFAULT_PANEL_AREA, step=0.1)
+        panel_efficiency = st.slider("Solar Panel Efficiency (%):", min_value=10, max_value=30, value=int(DEFAULT_PANEL_EFFICIENCY * 100)) / 100
 
-for hour in hours:
-    localized_time = timezone.localize(selected_datetime.replace(hour=hour, minute=0, second=0, microsecond=0))
-    ghi = calculate_ghi(lat, lon, localized_time, cloud_cover, temperature, humidity, wind_speed)
-    ghi_values.append(ghi)
-    power_outputs.append(calculate_power_output(ghi))
+    # Calculate GHI and power output
+    ghi_values = []
+    power_outputs = []
 
-# Total daily savings calculation
-total_power_output = sum(power_outputs) / 1000  # Convert W to kWh
-total_savings = total_power_output * electricity_cost
+    for hour in hours:
+        time = datetime.now().replace(hour=hour, minute=0, second=0, microsecond=0)
+        time = pytz.UTC.localize(time)  # Make timezone-aware
 
-# Display interactive graph
-st.subheader("Predicted Power Output Over Time")
-plt.figure(figsize=(10, 5))
-plt.plot(hours, power_outputs, marker="o", label="Predicted Power Output", color="orange")
-plt.xlabel("Hour of the Day")
-plt.ylabel("Power Output (W)")
-plt.title(f"Solar Power Prediction for Latitude {lat:.2f}, Longitude {lon:.2f} on {selected_date}")
-plt.legend()
-st.pyplot(plt)
+        ghi = calculate_ghi(lat, lon, time, cloud_cover, temperature, humidity)
+        power_output = calculate_power_output(ghi, panel_area, panel_efficiency)
+        power_outputs.append(power_output)
 
-# Display midpoint results
-mid_index = len(hours) // 2
-st.write(f"**Midpoint Time:** {hours[mid_index]}:00")
-st.write(f"**Estimated GHI:** {ghi_values[mid_index]:.2f} W/m²")
-st.write(f"**Predicted Power Output:** {power_outputs[mid_index]:.2f} W")
-st.write(f"**Total Savings for Selected Time Range:** ${total_savings:.2f}")
+    # Calculate total power output and savings
+    total_power_output = sum(power_outputs) / 1000  # Convert W to kWh
+    daily_savings = total_power_output * electricity_price
+    annual_savings = daily_savings * 365
 
-# Add carbon offset estimate
-co2_offset = total_power_output * 0.85  # Average 0.85 kg CO2 offset per kWh of solar
-st.write(f"**Estimated Carbon Offset:** {co2_offset:.2f} kg CO₂")
+    # Display results
+    st.write(f"**Total Power Output (Daily):** {total_power_output:.2f} kWh")
+    st.write(f"**Estimated Daily Savings:** ${daily_savings:.2f}")
+    st.write(f"**Estimated Annual Savings:** ${annual_savings:.2f}")
+
+    # Plot power output over time
+    plt.figure(figsize=(10, 5))
+    plt.plot(hours, power_outputs, marker="o", label="Power Output (W)", color="orange")
+    plt.xlabel("Hour of the Day")
+    plt.ylabel("Power Output (W)")
+    plt.title("Hourly Power Output")
+    plt.legend()
+    st.pyplot(plt)

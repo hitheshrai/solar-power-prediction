@@ -1,7 +1,10 @@
+streamlit
+folium
+streamlit-folium
+matplotlib
+plotly
+pysolar
+requests
 pandas
 numpy
-scikit-learn
-matplotlib
-joblib
-streamlit
-requests
+python-dotenv
