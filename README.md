@@ -1,83 +1,93 @@
 # Solar Power Dashboard
 
-A solar energy estimator that tells you exactly what a rooftop system will produce, save, and cost — for any location on Earth.
+A Streamlit dashboard that estimates rooftop solar production, savings, ROI, and environmental impact using live weather and industry reference APIs.
 
-## Problem statement
+## Overview
 
-Most people interested in rooftop solar still struggle to answer a few practical questions with confidence:
+This project combines:
 
-- How much electricity will my system generate at my exact location?
-- How much of that energy will I actually use versus export?
-- How much money will I save under my utility pricing and net metering rules?
-- How long will it take to recover system cost?
-- What is the environmental impact in terms of avoided CO2?
+- Live weather and irradiance data
+- Solar transposition and temperature derating physics
+- Net metering + financing scenarios
+- ROI and uncertainty analysis
+- Exportable summary and hourly data
 
-Many tools provide rough annual estimates, but not a transparent, hourly view that connects weather, system design, usage profile, economics, and environmental outcomes in one place.
-
-This project solves that gap by combining live weather data, solar physics, financial modeling, and interactive visualizations so homeowners, students, and practitioners can make data-driven solar decisions.
+The app is intended for homeowners, students, and practitioners who want transparent assumptions instead of black-box annual estimates.
 
 [![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://hitheshrai-solar-power-prediction.streamlit.app)
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ---
 
-## What it does
+## Features
 
-Enter a location and your electricity bill. The dashboard computes:
+Enter a location and system assumptions. The dashboard computes:
 
 | Question | Answer |
 |---|---|
-| How much will my panels produce? | Hourly kWh output with live cloud/temp forecast |
-| How much money will I save? | Daily + annual savings at your local electricity rate |
+| How much will my panels produce? | Hourly output from pvlib POA irradiance + weather |
+| How much money will I save? | Daily + annual savings with configurable net metering |
 | When do I break even? | Payback year on a 25-year ROI curve |
 | How many panels do I need? | Sized to 100% offset your monthly bill |
 | What's my CO₂ impact? | kg/yr, tree-equivalents, cars off the road |
 
 ---
 
-## Dashboard
+## Main modules in the UI
 
-```
-┌─ Sidebar ─────────────────────────────────────────────────────────────┐
-│  Location · Date · Panels · Efficiency · Tilt · Cost · Rate           │
-└───────────────────────────────────────────────────────────────────────┘
-
-  Daily kWh │ Daily $ │ Annual $ │ Payback │ CO₂ kg │ Panels needed
-
-┌─ Hourly power output ──────────────────┐  ┌─ Map ─────────────────────┐
-│  Power bars + GHI line + cloud shading │  │  Dark map, location pin   │
-└────────────────────────────────────────┘  └───────────────────────────┘
-
-┌─ 25-Year ROI ──────────────────────────┐  ┌─ System Sizing ───────────┐
-│  Net value curve · break-even marker   │  │  Panels vs bill offset %  │
-└────────────────────────────────────────┘  └───────────────────────────┘
-
-┌─ Live weather table ──┐  ┌─ CO₂ card ──┐  ┌─ Download (.txt / .csv) ─┐
-└───────────────────────┘  └─────────────┘  └──────────────────────────┘
-```
+- Location + weather lookup
+- System design (tilt, azimuth, bifacial, losses)
+- Financials (cash/loan/lease, incentives, net metering)
+- Battery storage simulation
+- Monte Carlo uncertainty bands
+- String and inverter sizing wizard
+- PVGIS and PVWatts cross-check views
 
 ---
 
 ## Local setup
 
+### Option A (recommended, Windows PowerShell)
+
+```powershell
+git clone https://github.com/hitheshrai/solar-power-prediction.git
+cd solar-power-prediction
+python -m venv Sol-power
+.\Sol-power\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+### Option B (macOS/Linux)
+
 ```bash
 git clone https://github.com/hitheshrai/solar-power-prediction.git
 cd solar-power-prediction
-pip install -r requirements.txt
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
 Copy the secrets template and fill in your keys:
 
 ```bash
 cp .streamlit/secrets.toml.example .streamlit/secrets.toml
-# edit .streamlit/secrets.toml with your API keys
 ```
+
+Edit `.streamlit/secrets.toml` with your API keys.
 
 Run:
 
 ```bash
-streamlit run app.py
+python -m streamlit run app.py
+```
+
+## Run tests
+
+```bash
+python -m pytest tests/test_functions.py -v
 ```
 
 ---
@@ -101,22 +111,28 @@ TIMEZONE_API_KEY    = "your_key"
 
 ## API keys
 
-All three are free:
+The app can run with only geocoding configured, but some features degrade without optional keys.
 
 | Key | Where to get it | Required? |
 |---|---|---|
-| `OPENWEATHER_API_KEY` | [openweathermap.org/api](https://openweathermap.org/api) | Yes |
-| `NREL_API_KEY` | [developer.nrel.gov](https://developer.nrel.gov/signup/) | No (US rate lookup) |
-| `TIMEZONE_API_KEY` | [timezonedb.com/api](https://timezonedb.com/api) | No (accurate local time) |
+| `OPENWEATHER_API_KEY` | [openweathermap.org/api](https://openweathermap.org/api) | Yes (location geocoding) |
+| `NREL_API_KEY` | [developer.nrel.gov](https://developer.nrel.gov/signup/) | No (PVWatts + utility rates) |
+| `TIMEZONE_API_KEY` | [timezonedb.com/api](https://timezonedb.com/api) | No (timezone fallback) |
+| `OPENEI_API_KEY` | [openei.org/services](https://openei.org/services/) | No (TOU rates) |
+| `CESIUM_ION_TOKEN` | [cesium.com/ion](https://cesium.com/ion/) | No (3D globe) |
 
 ---
 
-## Physics notes
+## Data and modeling notes
 
-- **GHI model**: clear-sky baseline `900·cos(zenith) + 100 W/m²`, attenuated by cloud transmittance `1 − 0.75·cloud^3.4`, panel temperature derating `0.4%/°C above 25°C`, and humidity haze factor
-- **Tilt factor**: `cos(tilt − |latitude|)`, clamped to [0.70, 1.15]
-- **CO₂ factor**: 0.386 kg/kWh (US EPA average)
-- **Panel degradation**: compound annual reduction applied to 25-year savings curve
+- Weather forecast: Open-Meteo hourly irradiance and weather fields
+- Location search: OpenWeather geocoding
+- POA irradiance: pvlib `get_total_irradiance` (Perez model)
+- Soiling: precipitation-driven Kimber-style accumulation/reset
+- Power model: panel efficiency + temperature derating + inverter efficiency + user losses
+- Annual yield baseline: PVGIS monthly TMY (fallback to daily x 365)
+- Optional benchmark: NREL PVWatts v8
+- Environmental factors: country-level grid intensity map with fallback
 
 ---
 
@@ -125,9 +141,12 @@ All three are free:
 - [Streamlit](https://streamlit.io) — dashboard framework
 - [Plotly](https://plotly.com/python/) — interactive charts
 - [Folium](https://python-visualization.github.io/folium/) — map
-- [Pysolar](https://pysolar.readthedocs.io/) — solar altitude calculation
-- [OpenWeather API](https://openweathermap.org/api) — geocoding + hourly forecast
-- [NREL Utility Rates API](https://developer.nrel.gov/docs/electricity/utility-rates-v3/) — US electricity pricing
+- [Pysolar](https://pysolar.readthedocs.io/) — sun path / azimuth-altitude
+- [pvlib](https://pvlib-python.readthedocs.io/) — irradiance transposition and cell temperature
+- [Open-Meteo](https://open-meteo.com/en/docs) — hourly forecast and precipitation history
+- [OpenWeather API](https://openweathermap.org/api) — geocoding
+- [NREL APIs](https://developer.nrel.gov/docs/) — PVWatts + utility rates
+- [PVGIS](https://joint-research-centre.ec.europa.eu/pvgis-photovoltaic-geographical-information-system_en) — TMY monthly reference
 
 ---
 

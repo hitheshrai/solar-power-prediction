@@ -149,7 +149,7 @@ def fetch_open_meteo(lat, lon):
         "https://api.open-meteo.com/v1/forecast"
         f"?latitude={lat}&longitude={lon}"
         "&hourly=direct_normal_irradiance,diffuse_radiation,shortwave_radiation,"
-        "precipitation,temperature_2m,cloudcover,windspeed_10m"
+        "precipitation,temperature_2m,cloud_cover,wind_speed_10m"
         "&timezone=auto&forecast_days=1"
     )
     try:
@@ -167,8 +167,8 @@ def fetch_open_meteo(lat, lon):
                 "ghi":   hourly.get("shortwave_radiation",      [0]*24)[i] or 0,
                 "precip":hourly.get("precipitation",            [0]*24)[i] or 0,
                 "temp":  hourly.get("temperature_2m",           [25]*24)[i] or 25,
-                "wind":  hourly.get("windspeed_10m",            [1]*24)[i] or 1,
-                "cloud": hourly.get("cloudcover",               [30]*24)[i] or 0,
+                "wind":  hourly.get("wind_speed_10m",           [1]*24)[i] or 1,
+                "cloud": hourly.get("cloud_cover",              [30]*24)[i] or 0,
                 "desc":  "Live forecast",
             }
         return result
@@ -523,10 +523,12 @@ def evaluate_financing(annual_sav, net_system_cost, degradation_pct,
     lease_annual = lease_monthly * 12
     lease_net_vals = []
     lease_cum = 0.0
-    lease_payback = 0
+    lease_payback = None
     yr_sav = annual_sav
     for y in years:
         lease_net_vals.append(round(lease_cum, 2))
+        if lease_cum >= 0 and lease_payback is None:
+            lease_payback = y
         lease_payment = lease_annual if y < lease_term_yrs else 0
         lease_cum += (yr_sav - lease_payment)
         yr_sav *= (1 - degradation_pct / 100)
@@ -1007,7 +1009,7 @@ kpi(c1, "Daily Output",    f"{daily_kwh:.1f} kWh",   f"Peak {peak_kw:.1f} kW")
 kpi(c2, "Daily Savings",   f"${daily_sav:.2f}",      f"@ ${elec_rate:.3f}/kWh")
 kpi(c3, "Annual Savings",  f"${annual_sav:,.0f}",    f"{annual_kwh:,.0f} kWh/yr {'(PVGIS TMY)' if pvgis_monthly else '(est.)'}")
 kpi(c4, "Payback",
-    f"{payback_yr} yr" if payback_yr else ">25 yr",
+    f"{payback_yr} yr" if payback_yr is not None else ">25 yr",
     f"${net_system_cost:,.0f} net cost")
 kpi(c5, "CO₂ Offset",       f"{co2_kg:.0f} kg/yr",   f"≈ {trees:.0f} trees · {cars:.2f} cars")
 kpi(c6, "Panels Needed",    f"{panels_needed}",      f"for ${monthly_bill:.0f}/mo bill")
@@ -1118,28 +1120,35 @@ with col_map:
         <div id="c"></div>
         <script>
         Cesium.Ion.defaultAccessToken = '{CESIUM_ION_TOKEN}';
-        const viewer = new Cesium.Viewer('c', {{
-            terrainProvider: Cesium.createWorldTerrain(),
-            timeline:false, animation:false, baseLayerPicker:false,
-            geocoder:false, homeButton:false, sceneModePicker:false,
-            navigationHelpButton:false, shadows:true
-        }});
-        viewer.scene.primitives.add(Cesium.createOsmBuildings());
-        viewer.camera.flyTo({{
-            destination: Cesium.Cartesian3.fromDegrees({lon}, {lat}, 600),
-            orientation: {{heading:0, pitch:-0.6, roll:0}}
-        }});
-        viewer.entities.add({{
-            position: Cesium.Cartesian3.fromDegrees({lon}, {lat}, 5),
-            point: {{pixelSize:14, color:Cesium.Color.fromCssColorString('#f97316')}},
-            label: {{text:'{loc_name}: {daily_kwh:.1f} kWh/day',
-                     font:'12px sans-serif',
-                     fillColor:Cesium.Color.WHITE,
-                     pixelOffset:new Cesium.Cartesian2(0,-24)}}
-        }});
-        const d = new Date('{sel_date.year}-{sel_date.month:02d}-{sel_date.day:02d}T12:00:00Z');
-        viewer.clock.currentTime = Cesium.JulianDate.fromDate(d);
-        viewer.clock.shouldAnimate = false;
+        // Use async init — createWorldTerrain() and createOsmBuildings() removed in 1.107+
+        async function init() {{
+            const viewer = new Cesium.Viewer('c', {{
+                terrain: Cesium.Terrain.fromWorldTerrain(),
+                timeline:false, animation:false, baseLayerPicker:false,
+                geocoder:false, homeButton:false, sceneModePicker:false,
+                navigationHelpButton:false, shadows:true
+            }});
+            try {{
+                const osmBuildings = await Cesium.createOsmBuildingsAsync();
+                viewer.scene.primitives.add(osmBuildings);
+            }} catch(e) {{ console.warn('OSM Buildings unavailable', e); }}
+            viewer.camera.flyTo({{
+                destination: Cesium.Cartesian3.fromDegrees({lon}, {lat}, 600),
+                orientation: {{heading:0, pitch:-0.6, roll:0}}
+            }});
+            viewer.entities.add({{
+                position: Cesium.Cartesian3.fromDegrees({lon}, {lat}, 5),
+                point: {{pixelSize:14, color:Cesium.Color.fromCssColorString('#f97316')}},
+                label: {{text:'{loc_name}: {daily_kwh:.1f} kWh/day',
+                         font:'12px sans-serif',
+                         fillColor:Cesium.Color.WHITE,
+                         pixelOffset:new Cesium.Cartesian2(0,-24)}}
+            }});
+            const d = new Date('{sel_date.year}-{sel_date.month:02d}-{sel_date.day:02d}T12:00:00Z');
+            viewer.clock.currentTime = Cesium.JulianDate.fromDate(d);
+            viewer.clock.shouldAnimate = false;
+        }}
+        init().catch(console.error);
         </script></body></html>
         """
         st.components.v1.html(cesium_html, height=430, scrolling=False)
@@ -1172,7 +1181,7 @@ with col_roi:
         hovertemplate="Year %{x}: $%{y:,.0f}<extra></extra>",
     ))
     fig2.add_hline(y=0, line_color="#666", line_dash="dash")
-    if payback_yr:
+    if payback_yr is not None:
         fig2.add_vline(
             x=payback_yr, line_color="#facc15", line_dash="dot",
             annotation_text=f"Break-even yr {payback_yr}",
@@ -1191,7 +1200,7 @@ with col_roi:
     st.plotly_chart(fig2, use_container_width=True)
 
     r1, r2, r3 = st.columns(3)
-    r1.metric("Payback", f"{payback_yr} yr" if payback_yr else ">25 yr")
+    r1.metric("Payback", f"{payback_yr} yr" if payback_yr is not None else ">25 yr")
     profit_25 = net_vals[-1]
     roi_pct   = profit_25 / net_system_cost * 100 if net_system_cost else 0
     r2.metric("25-yr net profit", f"${profit_25:,.0f}", delta=f"{roi_pct:.0f}% ROI")
@@ -1549,7 +1558,7 @@ with col_dl:
         f"Exported:             {exported_kwh:.2f} kWh",
         f"Daily savings:        ${daily_sav:.2f}",
         f"Annual savings:       ${annual_sav:,.0f}",
-        f"Payback:              {payback_yr} yr" if payback_yr else "Payback:              >25 yr",
+        f"Payback:              {payback_yr} yr" if payback_yr is not None else "Payback:              >25 yr",
         f"CO₂ offset:           {co2_kg:.0f} kg/yr ({trees:.0f} trees)",
         f"CO₂ factor:           {co2_factor} kg/kWh ({country})",
         f"Today soiling:        {today_soiling*100:.1f}%",
