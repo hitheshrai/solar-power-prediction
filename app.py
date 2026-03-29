@@ -450,6 +450,120 @@ def build_load_profile(archetype, scale=1.0):
     return [v / total * scale for v in raw]
 
 
+def payback_curve(annual_sav, system_cost, degradation_pct, years=25):
+    """Return payback year and annual net value curve for a fixed horizon."""
+    payback_yr = None
+    net_vals = []
+    cum = 0.0
+    yr_sav = annual_sav
+    for y in range(years + 1):
+        net_vals.append(round(cum - system_cost, 2))
+        if cum >= system_cost and payback_yr is None:
+            payback_yr = y
+        yr_sav *= (1 - degradation_pct / 100)
+        cum += yr_sav
+    return payback_yr, net_vals
+
+
+def monthly_loan_payment(principal, apr_pct, term_years):
+    """Standard amortizing loan payment formula."""
+    if principal <= 0 or term_years <= 0:
+        return 0.0
+    r = (apr_pct / 100) / 12
+    n = int(term_years * 12)
+    if r == 0:
+        return principal / n
+    return principal * (r * (1 + r) ** n) / ((1 + r) ** n - 1)
+
+
+def evaluate_financing(annual_sav, net_system_cost, degradation_pct,
+                       loan_apr, loan_term_yrs, down_payment_pct,
+                       lease_monthly, lease_escalator_pct, lease_term_yrs):
+    """Build comparable 25-year outcomes for cash, loan, and lease/PPA modes."""
+    years = list(range(26))
+
+    # Cash
+    cash_payback, cash_net = payback_curve(annual_sav, net_system_cost, degradation_pct)
+
+    # Loan
+    down_payment = net_system_cost * (down_payment_pct / 100)
+    financed_principal = max(net_system_cost - down_payment, 0)
+    loan_monthly = monthly_loan_payment(financed_principal, loan_apr, loan_term_yrs)
+    loan_annual_payment = loan_monthly * 12
+    loan_net_vals = []
+    loan_cum = -down_payment
+    loan_payback = None
+    yr_sav = annual_sav
+    for y in years:
+        loan_net_vals.append(round(loan_cum, 2))
+        if loan_cum >= 0 and loan_payback is None:
+            loan_payback = y
+        payment = loan_annual_payment if y < loan_term_yrs else 0
+        loan_cum += (yr_sav - payment)
+        yr_sav *= (1 - degradation_pct / 100)
+
+    # Lease / PPA
+    lease_annual = lease_monthly * 12
+    lease_net_vals = []
+    lease_cum = 0.0
+    lease_payback = 0
+    yr_sav = annual_sav
+    for y in years:
+        lease_net_vals.append(round(lease_cum, 2))
+        lease_payment = lease_annual if y < lease_term_yrs else 0
+        lease_cum += (yr_sav - lease_payment)
+        yr_sav *= (1 - degradation_pct / 100)
+        if y < lease_term_yrs:
+            lease_annual *= (1 + lease_escalator_pct / 100)
+
+    return {
+        "cash": {
+            "payback_yr": cash_payback,
+            "net_vals": cash_net,
+            "monthly_payment": 0.0,
+            "upfront": net_system_cost,
+            "profit_25": cash_net[-1],
+        },
+        "loan": {
+            "payback_yr": loan_payback,
+            "net_vals": loan_net_vals,
+            "monthly_payment": loan_monthly,
+            "upfront": down_payment,
+            "profit_25": loan_net_vals[-1],
+        },
+        "lease": {
+            "payback_yr": lease_payback,
+            "net_vals": lease_net_vals,
+            "monthly_payment": lease_monthly,
+            "upfront": 0.0,
+            "profit_25": lease_net_vals[-1],
+        },
+    }
+
+
+def calc_string_sizing(panel_voc, panel_vmp, temp_coeff_voc_pct, min_temp_c,
+                       inverter_max_dc_v, mppt_min_v, mppt_max_v,
+                       inverter_mppts, strings_per_mppt_max):
+    """Return valid module-per-string range based on voltage constraints."""
+    cold_delta = 25 - min_temp_c
+    temp_gain = abs(temp_coeff_voc_pct) / 100 * cold_delta
+    voc_cold = panel_voc * (1 + temp_gain)
+
+    max_by_abs_dc = math.floor(inverter_max_dc_v / voc_cold) if voc_cold > 0 else 0
+    min_by_mppt = math.ceil(mppt_min_v / panel_vmp) if panel_vmp > 0 else 0
+    max_by_mppt = math.floor(mppt_max_v / panel_vmp) if panel_vmp > 0 else 0
+
+    min_valid = max(1, min_by_mppt)
+    max_valid = min(max_by_abs_dc, max_by_mppt)
+
+    return {
+        "voc_cold": voc_cold,
+        "min_valid": min_valid,
+        "max_valid": max_valid,
+        "max_total_modules": max_valid * inverter_mppts * strings_per_mppt_max if max_valid > 0 else 0,
+    }
+
+
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 
 with st.sidebar:
@@ -507,6 +621,22 @@ with st.sidebar:
         loss_lid         = st.slider("LID (%)",         0.0,  5.0, 1.5, step=0.5)
         loss_availability= st.slider("Availability (%)",0.0, 10.0, 3.0, step=0.5)
 
+    # ── Incentives ────────────────────────────────────────────────────────────
+    with st.expander("🏛️ Incentives"):
+        federal_itc_pct = st.slider("Federal ITC (%)", 0, 50, 30,
+                                    help="US federal tax credit default is 30%")
+        state_rebate = st.number_input("State/local rebate ($)", 0, 50000, 0, step=250)
+
+    # ── Financing ─────────────────────────────────────────────────────────────
+    with st.expander("💳 Financing"):
+        st.caption("Compare cash vs loan vs lease/PPA using these assumptions.")
+        loan_apr = st.number_input("Loan APR (%)", 0.0, 25.0, 6.5, step=0.1)
+        loan_term_yrs = st.slider("Loan term (years)", 1, 30, 15)
+        down_payment_pct = st.slider("Loan down payment (%)", 0, 100, 20)
+        lease_monthly = st.number_input("Lease/PPA monthly payment ($)", 0.0, 5000.0, 120.0, step=5.0)
+        lease_escalator_pct = st.number_input("Lease annual escalator (%/yr)", 0.0, 10.0, 2.9, step=0.1)
+        lease_term_yrs = st.slider("Lease term (years)", 1, 30, 20)
+
     # ── Electricity Rate ──────────────────────────────────────────────────────
     with st.expander("🔌 Electricity Rate", expanded=True):
         rate_mode = st.radio("Rate source", ["Auto (NREL)", "Manual"], horizontal=True)
@@ -529,6 +659,22 @@ with st.sidebar:
     # ── Monte Carlo ───────────────────────────────────────────────────────────
     with st.expander("📊 Uncertainty"):
         show_mc = st.checkbox("Show P10/P90 uncertainty bands")
+        show_sensitivity = st.checkbox("Show sensitivity analysis", value=True)
+
+    # ── String and Inverter Sizing ────────────────────────────────────────────
+    with st.expander("🧰 String and Inverter Sizing"):
+        show_string_wizard = st.checkbox("Enable sizing wizard")
+        panel_voc = st.number_input("Panel Voc at STC (V)", 10.0, 80.0, 49.5, step=0.1)
+        panel_vmp = st.number_input("Panel Vmp at STC (V)", 10.0, 80.0, 41.5, step=0.1)
+        temp_coeff_voc_pct = st.number_input("Voc temp coeff (%/°C)", -1.0, 0.0, -0.28, step=0.01)
+        min_temp_c = st.number_input("Coldest design temp (°C)", -40, 25, -10)
+        inverter_max_dc_v = st.number_input("Inverter max DC voltage (V)", 200, 1500, 1000, step=10)
+        mppt_min_v = st.number_input("MPPT min voltage (V)", 50, 1000, 200, step=10)
+        mppt_max_v = st.number_input("MPPT max voltage (V)", 100, 1000, 850, step=10)
+        inverter_mppts = st.number_input("Inverter MPPT count", 1, 8, 2)
+        strings_per_mppt_max = st.number_input("Max strings per MPPT", 1, 6, 2)
+        module_power_w = st.number_input("Panel DC rating (W)", 100, 800, 420, step=5)
+        inverter_ac_kw = st.number_input("Inverter AC rating (kW)", 0.5, 200.0, 8.0, step=0.1)
 
 
 # ── Gate: require API key + location ──────────────────────────────────────────
@@ -696,19 +842,75 @@ annual_sav  = daily_sav * 365
 co2_kg      = annual_kwh * co2_factor
 trees       = co2_kg / 21
 cars        = co2_kg / 4600
-system_cost = n_panels * cost_per_panel + battery_cost
+gross_system_cost = n_panels * cost_per_panel + battery_cost
+federal_itc_value = gross_system_cost * (federal_itc_pct / 100)
+net_system_cost   = max(gross_system_cost - federal_itc_value - state_rebate, 0)
 
 # Payback curve
-payback_yr  = None
-net_vals    = []
-cum         = 0.0
-yr_sav      = annual_sav
-for y in range(26):
-    net_vals.append(round(cum - system_cost, 2))
-    if cum >= system_cost and payback_yr is None:
-        payback_yr = y
-    yr_sav *= (1 - degradation / 100)
-    cum    += yr_sav
+payback_yr, net_vals = payback_curve(annual_sav, net_system_cost, degradation)
+
+# Energy degradation curve
+degradation_years = list(range(26))
+annual_energy_curve = [annual_kwh * ((1 - degradation / 100) ** y) for y in degradation_years]
+
+# Financing comparison
+fin = evaluate_financing(
+    annual_sav,
+    net_system_cost,
+    degradation,
+    loan_apr,
+    loan_term_yrs,
+    down_payment_pct,
+    lease_monthly,
+    lease_escalator_pct,
+    lease_term_yrs,
+)
+
+# Sensitivity setup (+/-20% around base case)
+def _profit_25(annual_sav_v, system_cost_v, degradation_v):
+    return payback_curve(annual_sav_v, system_cost_v, degradation_v)[1][-1]
+
+base_profit_25 = _profit_25(annual_sav, net_system_cost, degradation)
+sensitivity_items = [
+    ("Annual savings", annual_sav, 1, 1, degradation),
+    ("Net system cost", net_system_cost, 1, 1, degradation),
+    ("Electric rate", elec_rate, annual_sav / elec_rate if elec_rate > 0 else 0, 1, degradation),
+    ("Degradation", degradation, annual_sav, net_system_cost, 1),
+]
+
+sensitivity_rows = []
+for label, base_v, a_ref, c_ref, d_ref in sensitivity_items:
+    if label == "Degradation":
+        low_v = max(base_v * 0.8, 0)
+        high_v = min(base_v * 1.2, 15)
+        low_profit = _profit_25(a_ref, c_ref, low_v)
+        high_profit = _profit_25(a_ref, c_ref, high_v)
+    elif label == "Annual savings":
+        low_profit = _profit_25(base_v * 0.8, net_system_cost, degradation)
+        high_profit = _profit_25(base_v * 1.2, net_system_cost, degradation)
+    elif label == "Net system cost":
+        low_profit = _profit_25(annual_sav, max(base_v * 0.8, 0), degradation)
+        high_profit = _profit_25(annual_sav, base_v * 1.2, degradation)
+    else:  # Electric rate
+        low_rate = base_v * 0.8
+        high_rate = base_v * 1.2
+        low_profit = _profit_25(annual_sav * (low_rate / base_v), net_system_cost, degradation) if base_v > 0 else base_profit_25
+        high_profit = _profit_25(annual_sav * (high_rate / base_v), net_system_cost, degradation) if base_v > 0 else base_profit_25
+
+    sensitivity_rows.append({
+        "parameter": label,
+        "low_delta": low_profit - base_profit_25,
+        "high_delta": high_profit - base_profit_25,
+    })
+
+# String and inverter sizing
+string_result = calc_string_sizing(
+    panel_voc, panel_vmp, temp_coeff_voc_pct, min_temp_c,
+    inverter_max_dc_v, mppt_min_v, mppt_max_v,
+    inverter_mppts, strings_per_mppt_max,
+)
+dc_kw_nameplate = n_panels * module_power_w / 1000
+dc_ac_ratio = dc_kw_nameplate / inverter_ac_kw if inverter_ac_kw > 0 else 0
 
 # Sizing
 daily_needed   = (monthly_bill / elec_rate) / 30 if elec_rate else 10
@@ -767,11 +969,16 @@ kpi(c2, "Daily Savings",   f"${daily_sav:.2f}",      f"@ ${elec_rate:.3f}/kWh")
 kpi(c3, "Annual Savings",  f"${annual_sav:,.0f}",    f"{annual_kwh:,.0f} kWh/yr")
 kpi(c4, "Payback",
     f"{payback_yr} yr" if payback_yr else ">25 yr",
-    f"${system_cost:,} system cost")
+    f"${net_system_cost:,.0f} net cost")
 kpi(c5, "CO₂ Offset",       f"{co2_kg:.0f} kg/yr",   f"≈ {trees:.0f} trees · {cars:.2f} cars")
 kpi(c6, "Panels Needed",    f"{panels_needed}",      f"for ${monthly_bill:.0f}/mo bill")
 kpi(c7, "Self-Consumed",    f"{self_consump_pct:.0f}%", f"{self_consumed_kwh:.1f} kWh/day")
 kpi(c8, "Self-Sufficient",  f"{self_suffic_pct:.0f}%",  f"{grid_indep_hrs} grid-free hrs")
+
+st.caption(
+    f"Gross cost ${gross_system_cost:,.0f} · ITC ${federal_itc_value:,.0f} · "
+    f"Rebate ${state_rebate:,.0f} · Net cost ${net_system_cost:,.0f}"
+)
 
 # ── Row 2: Hourly chart + Map ──────────────────────────────────────────────────
 
@@ -947,7 +1154,7 @@ with col_roi:
     r1, r2, r3 = st.columns(3)
     r1.metric("Payback", f"{payback_yr} yr" if payback_yr else ">25 yr")
     profit_25 = net_vals[-1]
-    roi_pct   = profit_25 / system_cost * 100 if system_cost else 0
+    roi_pct   = profit_25 / net_system_cost * 100 if net_system_cost else 0
     r2.metric("25-yr net profit", f"${profit_25:,.0f}", delta=f"{roi_pct:.0f}% ROI")
 
     # PVWatts v8 cross-validation
@@ -1296,7 +1503,9 @@ with col_dl:
         f"Tilt: {tilt}°  |  Azimuth: {azimuth}°",
         f"Bifacial: {'Yes' if bifacial_on else 'No'}  |  Degradation: {degradation}%/yr",
         f"Rate: ${elec_rate:.3f}/kWh  |  Net metering: {net_meter_pct}%",
-        f"System cost: ${system_cost:,}  |  Total losses: {total_loss:.1f}%",
+        f"Gross cost: ${gross_system_cost:,}  |  Net cost after incentives: ${net_system_cost:,.0f}",
+        f"Federal ITC: {federal_itc_pct}% (${federal_itc_value:,.0f})  |  State rebate: ${state_rebate:,.0f}",
+        f"Total losses: {total_loss:.1f}%",
         "",
         f"Daily output:         {daily_kwh:.2f} kWh",
         f"Self-consumed:        {self_consumed_kwh:.2f} kWh ({self_consump_pct:.0f}%)",
@@ -1326,3 +1535,155 @@ with col_dl:
         file_name=f"solar_hourly_{loc_name}_{sel_date}.csv",
         mime="text/csv", use_container_width=True,
     )
+
+# ── Row 8: Degradation + Financing + Sensitivity + String Sizing ─────────────
+
+st.markdown('<div class="section-header">Planning Tools</div>', unsafe_allow_html=True)
+
+col_deg, col_fin = st.columns(2)
+
+with col_deg:
+    fig_deg = go.Figure()
+    fig_deg.add_trace(go.Scatter(
+        x=degradation_years,
+        y=annual_energy_curve,
+        name="Annual energy",
+        fill="tozeroy",
+        fillcolor="rgba(96,165,250,0.12)",
+        line=dict(color="#60a5fa", width=2),
+        hovertemplate="Year %{x}: %{y:,.0f} kWh<extra></extra>",
+    ))
+    fig_deg.update_layout(
+        height=270,
+        title="Production Degradation Curve",
+        margin=dict(t=30, b=10, l=0, r=0),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#ccc"),
+        xaxis=dict(title="Year", gridcolor="#333"),
+        yaxis=dict(title="kWh/year", gridcolor="#333"),
+        showlegend=False,
+    )
+    st.plotly_chart(fig_deg, use_container_width=True)
+
+with col_fin:
+    fig_fin = go.Figure()
+    fig_fin.add_trace(go.Scatter(
+        x=list(range(26)), y=fin["cash"]["net_vals"],
+        name="Cash", line=dict(color="#4ade80", width=2),
+    ))
+    fig_fin.add_trace(go.Scatter(
+        x=list(range(26)), y=fin["loan"]["net_vals"],
+        name="Loan", line=dict(color="#facc15", width=2),
+    ))
+    fig_fin.add_trace(go.Scatter(
+        x=list(range(26)), y=fin["lease"]["net_vals"],
+        name="Lease/PPA", line=dict(color="#f97316", width=2),
+    ))
+    fig_fin.add_hline(y=0, line_color="#666", line_dash="dash")
+    fig_fin.update_layout(
+        height=270,
+        title="Financing Comparison (25-year net value)",
+        margin=dict(t=30, b=10, l=0, r=0),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#ccc"),
+        xaxis=dict(title="Year", gridcolor="#333"),
+        yaxis=dict(title="Net value ($)", gridcolor="#333"),
+        legend=dict(orientation="h", y=1.12),
+    )
+    st.plotly_chart(fig_fin, use_container_width=True)
+
+    fin_df = pd.DataFrame([
+        {
+            "Mode": "Cash",
+            "Upfront ($)": round(fin["cash"]["upfront"], 0),
+            "Monthly ($)": round(fin["cash"]["monthly_payment"], 2),
+            "Payback (yr)": fin["cash"]["payback_yr"] if fin["cash"]["payback_yr"] is not None else ">25",
+            "25-yr net ($)": round(fin["cash"]["profit_25"], 0),
+        },
+        {
+            "Mode": "Loan",
+            "Upfront ($)": round(fin["loan"]["upfront"], 0),
+            "Monthly ($)": round(fin["loan"]["monthly_payment"], 2),
+            "Payback (yr)": fin["loan"]["payback_yr"] if fin["loan"]["payback_yr"] is not None else ">25",
+            "25-yr net ($)": round(fin["loan"]["profit_25"], 0),
+        },
+        {
+            "Mode": "Lease/PPA",
+            "Upfront ($)": round(fin["lease"]["upfront"], 0),
+            "Monthly ($)": round(fin["lease"]["monthly_payment"], 2),
+            "Payback (yr)": fin["lease"]["payback_yr"],
+            "25-yr net ($)": round(fin["lease"]["profit_25"], 0),
+        },
+    ])
+    st.dataframe(fin_df, hide_index=True, use_container_width=True, height=150)
+
+if show_sensitivity:
+    col_sens, col_str = st.columns(2)
+else:
+    col_str = st.container()
+
+if show_sensitivity:
+    with col_sens:
+        sens_order = sorted(sensitivity_rows, key=lambda x: max(abs(x["low_delta"]), abs(x["high_delta"])))
+        labels = [s["parameter"] for s in sens_order]
+        lows = [s["low_delta"] for s in sens_order]
+        highs = [s["high_delta"] for s in sens_order]
+
+        fig_sens = go.Figure()
+        fig_sens.add_trace(go.Bar(
+            y=labels,
+            x=lows,
+            orientation="h",
+            name="-20%",
+            marker_color="#60a5fa",
+            hovertemplate="%{y}: $%{x:,.0f}<extra>-20%</extra>",
+        ))
+        fig_sens.add_trace(go.Bar(
+            y=labels,
+            x=highs,
+            orientation="h",
+            name="+20%",
+            marker_color="#f97316",
+            hovertemplate="%{y}: $%{x:,.0f}<extra>+20%</extra>",
+        ))
+        fig_sens.add_vline(x=0, line_color="#666", line_dash="dash")
+        fig_sens.update_layout(
+            height=300,
+            title="Sensitivity (impact on 25-year net value)",
+            barmode="overlay",
+            margin=dict(t=35, b=10, l=0, r=0),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#ccc"),
+            xaxis=dict(title="Change in net value ($)", gridcolor="#333"),
+            yaxis=dict(gridcolor="#333"),
+            legend=dict(orientation="h", y=1.12),
+        )
+        st.plotly_chart(fig_sens, use_container_width=True)
+
+with col_str:
+    if show_string_wizard:
+        st.markdown('<div class="section-header">String and Inverter Sizing Wizard</div>', unsafe_allow_html=True)
+        if string_result["max_valid"] < string_result["min_valid"]:
+            st.error(
+                "No valid string length with the current voltage constraints. "
+                "Check panel Voc/Vmp or inverter MPPT limits."
+            )
+        else:
+            st.success(
+                f"Valid modules per string: {string_result['min_valid']} to {string_result['max_valid']} "
+                f"(cold Voc {string_result['voc_cold']:.1f} V/module)"
+            )
+            csa, csb, csc = st.columns(3)
+            csa.metric("Cold Voc/module", f"{string_result['voc_cold']:.1f} V")
+            csb.metric("Max total modules", f"{string_result['max_total_modules']}")
+            csc.metric("DC:AC ratio", f"{dc_ac_ratio:.2f}")
+
+            if dc_ac_ratio < 1.0:
+                st.warning("DC:AC ratio is low. Inverter may be underutilized.")
+            elif dc_ac_ratio > 1.5:
+                st.warning("DC:AC ratio is high. Check clipping risk.")
+            else:
+                st.info("DC:AC ratio is in a typical design range.")
