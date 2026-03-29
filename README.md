@@ -1,93 +1,130 @@
-# Solar Power Prediction 🌞
+# Solar Power Dashboard
 
-This project predicts solar power output based on geolocation, weather data, and solar panel configurations. It allows users to estimate daily and annual savings from solar power production using various customizable parameters, including panel size, efficiency, and tilt. It also provides economic analysis, such as ROI and installation cost estimation.
+A solar energy estimator that tells you exactly what a rooftop system will produce, save, and cost — for any location on Earth.
 
----
-
-### **Features**
-
-- **Location Search**: Search for any location globally to get latitude and longitude using OpenWeather Geocoding API.
-- **Weather Data Fetching**: Fetches real-time weather data including cloud cover, temperature, and humidity using the OpenWeather API.
-- **Solar Power Calculation**: Calculates solar power output based on Global Horizontal Irradiance (GHI), cloud cover, temperature, and humidity.
-- **Electricity Price Fetching**: Uses NREL API for U.S. locations to fetch electricity prices, with a fallback to manual input for non-U.S. locations.
-- **Advanced Configuration**: Customize solar panel area, efficiency, tilt, and orientation for advanced users.
-- **Economic Analysis**: Displays daily savings, annual savings, and ROI based on predicted power output and local electricity prices.
-- **Interactive Visualization**: Generates hourly solar power output and savings visualizations using Plotly.
-- **Interactive Map**: Visualize the selected location on an interactive map using Folium.
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://hitheshrai-solar-power-prediction.streamlit.app)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ---
 
-### **Tech Stack**
-- **Streamlit**: Web framework for interactive dashboards.
-- **Folium**: Interactive map for location selection.
-- **Plotly**: Interactive graphs for data visualization.
-- **OpenWeather API**: For real-time weather data (temperature, cloud cover, humidity, etc.).
-- **NREL API**: For fetching electricity prices (U.S. only).
-- **Pysolar**: For solar altitude and irradiance calculations.
-- **Matplotlib**: For additional visualizations.
+## What it does
+
+Enter a location and your electricity bill. The dashboard computes:
+
+| Question | Answer |
+|---|---|
+| How much will my panels produce? | Hourly kWh output with live cloud/temp forecast |
+| How much money will I save? | Daily + annual savings at your local electricity rate |
+| When do I break even? | Payback year on a 25-year ROI curve |
+| How many panels do I need? | Sized to 100% offset your monthly bill |
+| What's my CO₂ impact? | kg/yr, tree-equivalents, cars off the road |
 
 ---
 
-### **Installation**
+## Dashboard
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/hitheshrai/solar-power-prediction.git
-   cd solar-power-prediction
-   ```
+```
+┌─ Sidebar ─────────────────────────────────────────────────────────────┐
+│  Location · Date · Panels · Efficiency · Tilt · Cost · Rate           │
+└───────────────────────────────────────────────────────────────────────┘
 
-2. Install the required dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+  Daily kWh │ Daily $ │ Annual $ │ Payback │ CO₂ kg │ Panels needed
 
-3. Create a `.env` file in the root directory and add your API keys:
-   ```plaintext
-   OPENWEATHER_API_KEY=your_openweather_api_key
-   NREL_API_KEY=your_nrel_api_key
-   TIMEZONE_API_KEY=your_timezone_api_key
-   ```
+┌─ Hourly power output ──────────────────┐  ┌─ Map ─────────────────────┐
+│  Power bars + GHI line + cloud shading │  │  Dark map, location pin   │
+└────────────────────────────────────────┘  └───────────────────────────┘
 
-4. Run the application:
-   ```bash
-   streamlit run app.py
-   ```
+┌─ 25-Year ROI ──────────────────────────┐  ┌─ System Sizing ───────────┐
+│  Net value curve · break-even marker   │  │  Panels vs bill offset %  │
+└────────────────────────────────────────┘  └───────────────────────────┘
+
+┌─ Live weather table ──┐  ┌─ CO₂ card ──┐  ┌─ Download (.txt / .csv) ─┐
+└───────────────────────┘  └─────────────┘  └──────────────────────────┘
+```
 
 ---
 
-### **Usage**
+## Local setup
 
-- Enter the location (e.g., "San Francisco") in the search bar.
-- Adjust advanced panel configurations (optional).
-- Select a time range for solar power predictions.
-- View the **power output**, **savings**, and **ROI** based on solar panel configuration.
-- Explore economic savings through a daily/annual cost estimator.
-- Interactive map shows the location selected.
+```bash
+git clone https://github.com/hitheshrai/solar-power-prediction.git
+cd solar-power-prediction
+pip install -r requirements.txt
+```
 
----
+Copy the secrets template and fill in your keys:
 
-### **Demo**
-Visit the demo of the project at [Hithesh's Website](https://hitheshrai.github.io/Hithesh/) or check out the [project's GitHub repository](https://github.com/hitheshrai/solar-power-prediction.git).
+```bash
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+# edit .streamlit/secrets.toml with your API keys
+```
 
----
+Run:
 
-### **Connect with Me**
-
-- [LinkedIn: Hithesh Rai](https://www.linkedin.com/in/hithesh-rai-p/)
-- [Personal Website](https://hitheshrai.github.io/Hithesh/)
-
----
-
-### **Contributing**
-
-Feel free to open issues or submit pull requests to improve the project! Contributions are welcome.
+```bash
+streamlit run app.py
+```
 
 ---
 
-### **License**
+## Deploy to Streamlit Community Cloud (free)
 
-This project is licensed under the MIT License.
+1. Push this repo to GitHub (it's already there)
+2. Go to [share.streamlit.io](https://share.streamlit.io) and sign in with GitHub
+3. Click **New app** → select this repo → `app.py`
+4. Open **Advanced settings → Secrets** and paste:
+
+```toml
+OPENWEATHER_API_KEY = "your_key"
+NREL_API_KEY        = "your_key"
+TIMEZONE_API_KEY    = "your_key"
+```
+
+5. Click **Deploy** — live in ~60 seconds at `yourname-solar-power-prediction.streamlit.app`
 
 ---
 
-This README provides a comprehensive overview of the project, installation instructions, and usage guide. It also encourages contributions and provides contact links for you. Let me know if you'd like further customization! 🚀
+## API keys
+
+All three are free:
+
+| Key | Where to get it | Required? |
+|---|---|---|
+| `OPENWEATHER_API_KEY` | [openweathermap.org/api](https://openweathermap.org/api) | Yes |
+| `NREL_API_KEY` | [developer.nrel.gov](https://developer.nrel.gov/signup/) | No (US rate lookup) |
+| `TIMEZONE_API_KEY` | [timezonedb.com/api](https://timezonedb.com/api) | No (accurate local time) |
+
+---
+
+## Physics notes
+
+- **GHI model**: clear-sky baseline `900·cos(zenith) + 100 W/m²`, attenuated by cloud transmittance `1 − 0.75·cloud^3.4`, panel temperature derating `0.4%/°C above 25°C`, and humidity haze factor
+- **Tilt factor**: `cos(tilt − |latitude|)`, clamped to [0.70, 1.15]
+- **CO₂ factor**: 0.386 kg/kWh (US EPA average)
+- **Panel degradation**: compound annual reduction applied to 25-year savings curve
+
+---
+
+## Tech stack
+
+- [Streamlit](https://streamlit.io) — dashboard framework
+- [Plotly](https://plotly.com/python/) — interactive charts
+- [Folium](https://python-visualization.github.io/folium/) — map
+- [Pysolar](https://pysolar.readthedocs.io/) — solar altitude calculation
+- [OpenWeather API](https://openweathermap.org/api) — geocoding + hourly forecast
+- [NREL Utility Rates API](https://developer.nrel.gov/docs/electricity/utility-rates-v3/) — US electricity pricing
+
+---
+
+## Contributing
+
+Issues and pull requests are welcome.
+
+## Author
+
+[Hithesh Rai](https://hitheshrai.github.io/Hithesh/) · [LinkedIn](https://www.linkedin.com/in/hithesh-rai-p/)
+
+## License
+
+MIT

@@ -1,10 +1,11 @@
 streamlit
 folium
 streamlit-folium
-matplotlib
 plotly
 pysolar
 requests
 pandas
 numpy
 python-dotenv
+pvlib
+scipy

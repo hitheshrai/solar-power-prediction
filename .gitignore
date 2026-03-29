@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 *.log
 .env
+Sol-power/
+.venv/
+venv/
+.streamlit/secrets.toml
