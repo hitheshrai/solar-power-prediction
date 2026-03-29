@@ -244,15 +244,17 @@ def fetch_pvwatts_v8(lat, lon, capacity_kw, tilt, losses_pct):
 
 
 @st.cache_data(ttl=86400)
-def fetch_pvgis_monthly(lat, lon, capacity_kw, tilt):
+def fetch_pvgis_monthly(lat, lon, capacity_kw, tilt, azimuth_deg=180):
     """PVGIS PVcalc — monthly AC energy for a typical meteorological year."""
     url = "https://re.jrc.ec.europa.eu/api/v5_2/PVcalc"
+    # PVGIS aspect: 0=South, negative=East, positive=West (degrees from south)
+    pvgis_aspect = azimuth_deg - 180
     params = {
         "lat": lat, "lon": lon,
         "peakpower": capacity_kw,
         "loss": 14,
         "angle": tilt,
-        "aspect": 0,
+        "aspect": pvgis_aspect,
         "outputformat": "json",
         "pvtechchoice": "crystSi",
     }
@@ -266,11 +268,11 @@ def fetch_pvgis_monthly(lat, lon, capacity_kw, tilt):
 
 
 @st.cache_data(ttl=86400)
-def fetch_pvgis_tilt_comparison(lat, lon, capacity_kw):
+def fetch_pvgis_tilt_comparison(lat, lon, capacity_kw, azimuth_deg=180):
     """Fetch PVGIS monthly energy at 4 tilt angles for comparison chart."""
     results = {}
     for tilt_deg in [0, 30, 60, 90]:
-        monthly = fetch_pvgis_monthly(lat, lon, capacity_kw, tilt_deg)
+        monthly = fetch_pvgis_monthly(lat, lon, capacity_kw, tilt_deg, azimuth_deg)
         if monthly:
             results[tilt_deg] = monthly
     return results
@@ -328,14 +330,15 @@ def fetch_tou_schedule(lat, lon):
 
 # ── Physics ────────────────────────────────────────────────────────────────────
 
-def calc_poa_irradiance(lat, lon, times_aware, dni_series, dhi_series,
+def calc_poa_irradiance(lat, lon, times_aware, dni_series, dhi_series, ghi_series,
                         tilt, azimuth_deg=180,
                         bifacial=False, bifaciality=0.70, albedo=0.25):
     """
-    Use pvlib Perez transposition to compute plane-of-array irradiance.
+    Use pvlib get_total_irradiance (Perez sky model) to compute POA irradiance.
     times_aware : list of timezone-aware datetimes (one per hour)
     dni_series  : list of DNI values (W/m²)
     dhi_series  : list of DHI values (W/m²)
+    ghi_series  : list of GHI values (W/m²) — needed for ground-reflected component
     Returns list of POA global irradiance (W/m²).
     """
     idx = pd.DatetimeIndex(times_aware)
@@ -351,6 +354,7 @@ def calc_poa_irradiance(lat, lon, times_aware, dni_series, dhi_series,
         saz  = sp["azimuth"].iloc[i]
         dni  = max(float(dni_series[i]), 0)
         dhi  = max(float(dhi_series[i]), 0)
+        ghi  = max(float(ghi_series[i]), 0)
         am   = airmass[i] if not np.isnan(airmass[i]) else 2.0
         dne  = dni_extra[i]
 
@@ -359,19 +363,30 @@ def calc_poa_irradiance(lat, lon, times_aware, dni_series, dhi_series,
             continue
 
         try:
-            poa = pvlib.irradiance.perez(
-                tilt, azimuth_deg, dhi, dni, dne,
-                zen, saz, am,
+            # get_total_irradiance returns beam + sky_diffuse + ground_reflected
+            poa = pvlib.irradiance.get_total_irradiance(
+                tilt, azimuth_deg,
+                zen, saz,
+                dni, ghi, dhi,
+                dni_extra=dne, airmass=am,
+                albedo=albedo, model='perez',
             )
-            poa_global = float(poa.get("poa_global", 0) or 0)
+            poa_direct  = float(poa.get('poa_direct',  0) or 0)
+            poa_diffuse = float(poa.get('poa_diffuse', 0) or 0)
+
+            # Incidence Angle Modifier (IAM) — reflection loss at oblique angles
+            # Applied to beam only; ~0.94 effective factor for diffuse (isotropic glass)
+            aoi_deg = pvlib.irradiance.aoi(tilt, azimuth_deg, zen, saz)
+            iam     = float(pvlib.iam.physical(aoi_deg))
+            poa_global = poa_direct * iam + poa_diffuse * 0.94
         except Exception:
             poa_global = 0.0
 
         if bifacial:
+            # Rear-side irradiance: ground-reflected GHI onto the back surface
             gcr = 0.4
             view_factor = 0.5 * (1 - gcr) / max(gcr, 0.01)
-            ghi_approx  = dni * math.cos(math.radians(zen)) + dhi
-            poa_rear    = ghi_approx * albedo * bifaciality * view_factor * 0.85
+            poa_rear    = ghi * albedo * bifaciality * view_factor * 0.85
             poa_global  += max(poa_rear, 0)
 
         poa_list.append(max(poa_global, 0.0))
@@ -379,16 +394,18 @@ def calc_poa_irradiance(lat, lon, times_aware, dni_series, dhi_series,
     return poa_list
 
 
+INVERTER_EFF = 0.96  # Standard residential string inverter DC→AC efficiency
+
 def calc_system_power_kw(poa_w_m2, temp_air, wind_speed,
                          n_panels, area, eff, temp_coeff=-0.004):
     """Convert POA irradiance to system AC power using pvlib SAPM cell temp."""
     if poa_w_m2 <= 0:
         return 0.0
-    t_cell     = pvlib.temperature.sapm_cell(poa_w_m2, temp_air, wind_speed,
-                                              a=-3.56, b=-0.075, deltaT=3)
+    t_cell      = pvlib.temperature.sapm_cell(poa_w_m2, temp_air, wind_speed,
+                                               a=-3.56, b=-0.075, deltaT=3)
     temp_factor = 1 + temp_coeff * (float(t_cell) - 25)
-    power_kw    = poa_w_m2 * area * eff * n_panels * temp_factor / 1000
-    return max(power_kw, 0.0)
+    dc_power_kw = poa_w_m2 * area * eff * n_panels * temp_factor / 1000
+    return max(dc_power_kw * INVERTER_EFF, 0.0)
 
 
 def calc_soiling_losses(precip_daily, soil_rate=0.002, rain_threshold=1.0, max_soil=0.25):
@@ -460,8 +477,8 @@ def payback_curve(annual_sav, system_cost, degradation_pct, years=25):
         net_vals.append(round(cum - system_cost, 2))
         if cum >= system_cost and payback_yr is None:
             payback_yr = y
-        yr_sav *= (1 - degradation_pct / 100)
         cum += yr_sav
+        yr_sav *= (1 - degradation_pct / 100)
     return payback_yr, net_vals
 
 
@@ -747,16 +764,32 @@ weather_rows = [forecast.get(h, default_w) for h in hours]
 
 dni_series  = [w["dni"]  for w in weather_rows]
 dhi_series  = [w["dhi"]  for w in weather_rows]
+ghi_series  = [w["ghi"]  for w in weather_rows]
 temp_series = [w["temp"] for w in weather_rows]
 wind_series = [w["wind"] for w in weather_rows]
 
 # ── pvlib POA irradiance ──────────────────────────────────────────────────────
 
 poa_series = calc_poa_irradiance(
-    lat, lon, times_aware, dni_series, dhi_series,
+    lat, lon, times_aware, dni_series, dhi_series, ghi_series,
     tilt, azimuth,
     bifacial=bifacial_on, bifaciality=bifaciality, albedo=albedo,
 )
+
+# ── Soiling model (must run before records so loss is applied) ────────────────
+
+precip_hist     = fetch_open_meteo_historical_precip(lat, lon)
+monthly_soiling = calc_soiling_losses(precip_hist)
+today_soiling   = list(monthly_soiling.values())[-1] if monthly_soiling else 0.02
+
+# Combined derate: Kimber soiling + mismatch + wiring + LID + availability
+other_losses_factor = (
+    (1 - loss_mismatch / 100)
+    * (1 - loss_wiring / 100)
+    * (1 - loss_lid / 100)
+    * (1 - loss_availability / 100)
+)
+derate_factor = (1 - today_soiling) * other_losses_factor
 
 # ── Build records ─────────────────────────────────────────────────────────────
 
@@ -767,7 +800,7 @@ for i, h in enumerate(hours):
     poa  = poa_series[i]
     temp = temp_series[i]
     wind = wind_series[i]
-    kw   = calc_system_power_kw(poa, temp, wind, n_panels, panel_area, panel_eff, temp_coeff)
+    kw   = calc_system_power_kw(poa, temp, wind, n_panels, panel_area, panel_eff, temp_coeff) * derate_factor
     load = load_profile[i]
     sc   = min(kw, load)
     exp  = max(kw - load, 0)
@@ -815,17 +848,11 @@ if show_mc:
             mc_matrix[run, i] = calc_system_power_kw(
                 poa_v, temp_series[i], wind_series[i],
                 n_panels, panel_area, panel_eff, temp_coeff,
-            )
+            ) * derate_factor
     p10_kw = np.percentile(mc_matrix, 10, axis=0)
     p90_kw = np.percentile(mc_matrix, 90, axis=0)
     df["p10_kw"] = p10_kw
     df["p90_kw"] = p90_kw
-
-# ── Soiling model ─────────────────────────────────────────────────────────────
-
-precip_hist = fetch_open_meteo_historical_precip(lat, lon)
-monthly_soiling = calc_soiling_losses(precip_hist)
-today_soiling   = list(monthly_soiling.values())[-1] if monthly_soiling else 0.02
 
 # ── Financial calculations ────────────────────────────────────────────────────
 
@@ -837,8 +864,20 @@ grid_import_kwh  = float(df["grid_import"].sum())
 net_meter_rate   = elec_rate * (net_meter_pct / 100)
 daily_sav        = self_consumed_kwh * elec_rate + exported_kwh * net_meter_rate
 
-annual_kwh  = daily_kwh * 365
-annual_sav  = daily_sav * 365
+# ── Annual figures — use PVGIS TMY seasonal data instead of single-day × 365 ──
+
+capacity_kw   = n_panels * panel_area * panel_eff
+pvgis_monthly = fetch_pvgis_monthly(lat, lon, capacity_kw, tilt, azimuth)
+
+if pvgis_monthly:
+    annual_kwh  = sum(pvgis_monthly)
+    # Preserve the self-consumption / export split from the hourly simulation
+    sc_frac     = self_consumed_kwh / daily_kwh if daily_kwh > 0 else 0.7
+    ex_frac     = exported_kwh / daily_kwh if daily_kwh > 0 else 0.3
+    annual_sav  = annual_kwh * (sc_frac * elec_rate + ex_frac * net_meter_rate)
+else:
+    annual_kwh  = daily_kwh * 365
+    annual_sav  = daily_sav * 365
 co2_kg      = annual_kwh * co2_factor
 trees       = co2_kg / 21
 cars        = co2_kg / 4600
@@ -919,9 +958,8 @@ panels_needed  = math.ceil(daily_needed / kwh_per_panel) if kwh_per_panel else 0
 
 # Self-consumption stats
 self_consump_pct  = self_consumed_kwh / daily_kwh * 100 if daily_kwh > 0 else 0
-self_suffic_pct   = self_consumed_kwh / (daily_load_kwh / 24 * len(hours)) * 100 \
-                    if daily_load_kwh > 0 else 0
-self_suffic_pct   = min(self_suffic_pct, 100)
+load_in_window    = float(df["load_kw"].sum())
+self_suffic_pct   = min(self_consumed_kwh / load_in_window * 100, 100) if load_in_window > 0 else 0
 grid_indep_hrs    = int(df["grid_import"].eq(0).sum())
 
 # Avg cloud
@@ -946,8 +984,9 @@ st.markdown(
 st.caption(
     f"{lat:.4f}°, {lon:.4f}° &nbsp;|&nbsp; Timezone: {tz_name} &nbsp;|&nbsp; "
     f"CO₂ factor: {co2_factor} kg/kWh ({country}) &nbsp;|&nbsp; "
-    f"Tilt factor: {tilt_factor:.2f} &nbsp;|&nbsp; "
-    f"Soiling today: {today_soiling*100:.1f}% &nbsp;|&nbsp; "
+    f"Tilt factor: {tilt_factor:.2f} (approx display only — pvlib handles transposition) &nbsp;|&nbsp; "
+    f"Soiling today: {today_soiling*100:.1f}% (applied) &nbsp;|&nbsp; "
+    f"Derate factor: {derate_factor:.3f} &nbsp;|&nbsp; "
     f"{'Open-Meteo live' if forecast else 'Default weather'}"
 )
 
@@ -966,7 +1005,7 @@ def kpi(col, title, value, sub=""):
 c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
 kpi(c1, "Daily Output",    f"{daily_kwh:.1f} kWh",   f"Peak {peak_kw:.1f} kW")
 kpi(c2, "Daily Savings",   f"${daily_sav:.2f}",      f"@ ${elec_rate:.3f}/kWh")
-kpi(c3, "Annual Savings",  f"${annual_sav:,.0f}",    f"{annual_kwh:,.0f} kWh/yr")
+kpi(c3, "Annual Savings",  f"${annual_sav:,.0f}",    f"{annual_kwh:,.0f} kWh/yr {'(PVGIS TMY)' if pvgis_monthly else '(est.)'}")
 kpi(c4, "Payback",
     f"{payback_yr} yr" if payback_yr else ">25 yr",
     f"${net_system_cost:,.0f} net cost")
@@ -1158,7 +1197,6 @@ with col_roi:
     r2.metric("25-yr net profit", f"${profit_25:,.0f}", delta=f"{roi_pct:.0f}% ROI")
 
     # PVWatts v8 cross-validation
-    capacity_kw = n_panels * panel_area * panel_eff
     pvw = fetch_pvwatts_v8(lat, lon, capacity_kw, tilt, total_loss) if NREL_API_KEY else None
     if pvw and pvw.get("ac_annual"):
         r3.metric("PVWatts v8 yield", f"{pvw['ac_annual']:,.0f} kWh/yr",
@@ -1218,7 +1256,6 @@ col_pvgis, col_tilt = st.columns(2)
 MONTH_LABELS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
 
 with col_pvgis:
-    pvgis_monthly = fetch_pvgis_monthly(lat, lon, capacity_kw, tilt)
     if pvgis_monthly:
         figp = go.Figure(go.Bar(
             x=MONTH_LABELS, y=pvgis_monthly,
@@ -1253,7 +1290,7 @@ with col_pvgis:
 
 with col_tilt:
     if show_tilt_cmp:
-        tilt_data = fetch_pvgis_tilt_comparison(lat, lon, capacity_kw)
+        tilt_data = fetch_pvgis_tilt_comparison(lat, lon, capacity_kw, azimuth)
         if tilt_data:
             TILT_COLORS = {0: "#60a5fa", 30: "#4ade80", 60: "#facc15", 90: "#f97316"}
             figt = go.Figure()

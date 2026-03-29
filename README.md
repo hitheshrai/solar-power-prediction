@@ -2,6 +2,20 @@
 
 A solar energy estimator that tells you exactly what a rooftop system will produce, save, and cost — for any location on Earth.
 
+## Problem statement
+
+Most people interested in rooftop solar still struggle to answer a few practical questions with confidence:
+
+- How much electricity will my system generate at my exact location?
+- How much of that energy will I actually use versus export?
+- How much money will I save under my utility pricing and net metering rules?
+- How long will it take to recover system cost?
+- What is the environmental impact in terms of avoided CO2?
+
+Many tools provide rough annual estimates, but not a transparent, hourly view that connects weather, system design, usage profile, economics, and environmental outcomes in one place.
+
+This project solves that gap by combining live weather data, solar physics, financial modeling, and interactive visualizations so homeowners, students, and practitioners can make data-driven solar decisions.
+
 [![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://hitheshrai-solar-power-prediction.streamlit.app)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
